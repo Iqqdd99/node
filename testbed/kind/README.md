@@ -27,7 +27,19 @@ This guide will create two different Kubernetes clusters:
 - [Helm](https://helm.sh/docs/intro/install/)
 - [Liqo CLI tool](https://docs.liqo.io/en/v0.10.1/installation/liqoctl.html)
 
-### Installation
+## Common issues with KIND
+
+This setup relies on KIND (Kubernetes in Docker) to quickly establish a reliable testbed for testing the FLUIDOS Node architecture.
+
+There are common issues encountered when running multiple clusters with KIND, particularly related to swap space memory usage and resource limits within the operating systems.
+
+Therefore, we highly recommend running the following commands before proceeding with the installation process:
+
+1. `sudo swapoff -a`
+2. `sudo sysctl fs.inotify.max_user_instances=512`
+3. `sudo sysctl fs.inotify.max_user_watches=524288`
+
+## Installation
 
 1. Clone the repository
 
@@ -79,7 +91,7 @@ This allows for convenient monitoring of both consumer and provider clusters wit
 
 6. You should see 3 pods running on the `fluidos-consumer` cluster and 3 pods running on the `fluidos-provider` cluster:
 
-- `node-local-reaource-manager-<random>`
+- `node-local-resource-manager-<random>`
 - `node-rear-manager-<random>`
 - `node-rear-controller-<random>`
 
@@ -98,6 +110,8 @@ NAME                                   PROVIDER ID   TYPE          CPU          
 ```
 
 ### Usage
+
+In this section, we will instruct you on how you can interact with the FLUIDOS Node using an high-level approach. In case you want to interact with the FLUIDOS Node using its CRDs, please refer to the [low-level usage](../../docs/usage/usage.md) section.
 
 Now lets try to deploy a `solver` example CR on the `fluidos-consumer` cluster.
 
@@ -153,6 +167,7 @@ You can now create a demo namespace on the `fluidos-consumer` cluster:
 ```sh
 kubectl create namespace demo
 ```
+
 And then offload the namespace to the `fluidos-provider` cluster:
 
 ```sh

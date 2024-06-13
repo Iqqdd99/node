@@ -53,26 +53,30 @@ func (g *Gateway) getFlavours(w http.ResponseWriter, _ *http.Request) {
 
 	klog.Infof("Found %d Flavours in the cluster", len(flavours))
 
+	availableFlavours := make([]nodecorev1alpha1.Flavour, 0)
+
 	// Filtering only the available flavours
 	for i := range flavours {
 		if !flavours[i].Spec.OptionalFields.Availability {
-			flavours = append(flavours[:i], flavours[i+1:]...)
+			availableFlavours = append(availableFlavours, flavours[i])
 		}
 	}
 
-	klog.Infof("Available Flavours: %d", len(flavours))
-	if len(flavours) == 0 {
+	klog.Infof("Available Flavours: %d", len(availableFlavours))
+	if len(availableFlavours) == 0 {
 		klog.Infof("No available Flavours found")
-		http.Error(w, "No Flavours found", http.StatusNotFound)
+		// Return content for empty list
+		emptyList := make([]*nodecorev1alpha1.Flavour, 0)
+		encodeResponseStatusCode(w, emptyList, http.StatusNoContent)
 		return
 	}
 
 	// Select the flavour with the max CPU
 	max := resource.MustParse("0")
 	index := 0
-	for i := range flavours {
-		if flavours[i].Spec.Characteristics.Cpu.Cmp(max) == 1 {
-			max = flavours[i].Spec.Characteristics.Cpu
+	for i := range availableFlavours {
+		if availableFlavours[i].Spec.Characteristics.Cpu.Cmp(max) == 1 {
+			max = availableFlavours[i].Spec.Characteristics.Cpu
 			index = i
 		}
 	}
@@ -87,35 +91,6 @@ func (g *Gateway) getFlavours(w http.ResponseWriter, _ *http.Request) {
 	// Encode the Flavour as JSON and write it to the response writer
 	encodeResponse(w, parsed)
 }
-
-// getFlavourByID gets the flavour CR from the cluster that matches the flavourID
-/* func (g *Gateway) getFlavourByID(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-
-	// Get the flavourID from the URL
-	params := mux.Vars(r)
-	flavourID := params["flavourID"]
-
-	// Get the Flavour that matches the flavourID
-	flavour, err := services.GetFlavourByID(flavourID, g.client)
-	if err != nil {
-		http.Error(w, "Error getting the Flavour by ID", http.StatusInternalServerError)
-		return
-	}
-
-	if flavour == nil {
-		http.Error(w, "No Flavour found", http.StatusNotFound)
-		return
-	}
-
-	flavourParsed := parseutil.ParseFlavour(*flavour)
-
-	klog.Infof("Flavour found is: %s", flavourParsed.FlavourID)
-
-	// Encode the FlavourList as JSON and write it to the response writer
-	encodeResponse(w, flavourParsed)
-
-} */
 
 // getFlavourBySelectorHandler gets the flavour CRs from the cluster that match the selector.
 func (g *Gateway) getFlavoursBySelector(w http.ResponseWriter, r *http.Request) {
@@ -147,17 +122,21 @@ func (g *Gateway) getFlavoursBySelector(w http.ResponseWriter, r *http.Request) 
 
 	klog.Infof("Found %d Flavours in the cluster", len(flavours))
 
+	availableFlavours := make([]nodecorev1alpha1.Flavour, 0)
+
 	// Filtering only the available flavours
 	for i := range flavours {
-		if !flavours[i].Spec.OptionalFields.Availability {
-			flavours = append(flavours[:i], flavours[i+1:]...)
+		if flavours[i].Spec.OptionalFields.Availability {
+			availableFlavours = append(availableFlavours, flavours[i])
 		}
 	}
 
-	klog.Infof("Available Flavours: %d", len(flavours))
-	if len(flavours) == 0 {
+	klog.Infof("Available Flavours: %d", len(availableFlavours))
+	if len(availableFlavours) == 0 {
 		klog.Infof("No available Flavours found")
-		http.Error(w, "No Flavours found", http.StatusNotFound)
+		// Return content for empty list
+		emptyList := make([]*nodecorev1alpha1.Flavour, 0)
+		encodeResponseStatusCode(w, emptyList, http.StatusNoContent)
 		return
 	}
 
@@ -169,7 +148,7 @@ func (g *Gateway) getFlavoursBySelector(w http.ResponseWriter, r *http.Request) 
 	}
 
 	klog.Infof("Filtering Flavours by selector...")
-	flavoursSelected, err := common.FilterFlavoursBySelector(flavours, selector)
+	flavoursSelected, err := common.FilterFlavoursBySelector(availableFlavours, selector)
 	if err != nil {
 		http.Error(w, "Error getting the Flavours by selector", http.StatusInternalServerError)
 		return
@@ -179,7 +158,9 @@ func (g *Gateway) getFlavoursBySelector(w http.ResponseWriter, r *http.Request) 
 
 	if len(flavoursSelected) == 0 {
 		klog.Infof("No matching Flavours found")
-		http.Error(w, "No Flavours found", http.StatusNotFound)
+		// Return content for empty list
+		emptyList := make([]*nodecorev1alpha1.Flavour, 0)
+		encodeResponseStatusCode(w, emptyList, http.StatusNoContent)
 		return
 	}
 
@@ -188,8 +169,8 @@ func (g *Gateway) getFlavoursBySelector(w http.ResponseWriter, r *http.Request) 
 	index := 0
 
 	for i := range flavoursSelected {
-		if flavours[i].Spec.Characteristics.Cpu.Cmp(max) == 1 {
-			max = flavours[i].Spec.Characteristics.Cpu
+		if flavoursSelected[i].Spec.Characteristics.Cpu.Cmp(max) == 1 {
+			max = flavoursSelected[i].Spec.Characteristics.Cpu
 			index = i
 		}
 	}

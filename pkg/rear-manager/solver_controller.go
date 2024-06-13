@@ -40,7 +40,6 @@ import (
 	"github.com/fluidos-project/node/pkg/utils/namings"
 	"github.com/fluidos-project/node/pkg/utils/resourceforge"
 	"github.com/fluidos-project/node/pkg/utils/tools"
-	virtualfabricmanager "github.com/fluidos-project/node/pkg/virtual-fabric-manager"
 )
 
 // SolverReconciler reconciles a Solver object.
@@ -109,8 +108,7 @@ func (r *SolverReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 
 	// Check if the Solver has expired or failed, in this case do nothing and return
 	if solver.Status.SolverPhase.Phase == nodecorev1alpha1.PhaseFailed ||
-		solver.Status.SolverPhase.Phase == nodecorev1alpha1.PhaseTimeout ||
-		solver.Status.SolverPhase.Phase == nodecorev1alpha1.PhaseSolved {
+		solver.Status.SolverPhase.Phase == nodecorev1alpha1.PhaseTimeout {
 		return ctrl.Result{}, nil
 	}
 
@@ -118,7 +116,6 @@ func (r *SolverReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		if findCandidateStatus != nodecorev1alpha1.PhaseSolved {
 			return r.handleFindCandidate(ctx, req, &solver)
 		}
-		klog.Infof("Solver %s has reserved and purchased the resources", req.NamespacedName.Name)
 	} else {
 		klog.Infof("Solver %s Solved : No need to find a candidate", req.NamespacedName.Name)
 		solver.SetPhase(nodecorev1alpha1.PhaseSolved, "No need to find a candidate")
@@ -127,11 +124,11 @@ func (r *SolverReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 			klog.Errorf("Error when updating Solver %s status: %s", req.NamespacedName, err)
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{}, nil
 	}
 
 	if solver.Spec.ReserveAndBuy {
-		if findCandidateStatus == nodecorev1alpha1.PhaseSolved && reserveAndBuyStatus != nodecorev1alpha1.PhaseSolved {
+		if (findCandidateStatus == nodecorev1alpha1.PhaseSolved || !solver.Spec.FindCandidate) &&
+			reserveAndBuyStatus != nodecorev1alpha1.PhaseSolved {
 			return r.handleReserveAndBuy(ctx, req, &solver)
 		}
 	} else {
@@ -189,7 +186,7 @@ func (r *SolverReconciler) handleFindCandidate(ctx context.Context, req ctrl.Req
 		// If some PeeringCandidates are available, select one and book it
 		if len(pc) > 0 {
 			// If some PeeringCandidates are available, select one and book it
-			selectedPc, err := r.selectAndBookPeeringCandidate(ctx, solver, pc)
+			selectedPc, err := r.selectAndBookPeeringCandidate(pc)
 			if err != nil {
 				klog.Errorf("Error when selecting and booking a candidate for Solver %s: %s", req.NamespacedName.Name, err)
 				return ctrl.Result{}, err
@@ -203,7 +200,6 @@ func (r *SolverReconciler) handleFindCandidate(ctx context.Context, req ctrl.Req
 			}
 			return ctrl.Result{}, nil
 		}
-
 		// If no PeeringCandidate is available, Create a Discovery
 		klog.Infof("Solver %s has not found any candidate. Trying a Discovery", req.NamespacedName.Name)
 		solver.SetFindCandidateStatus(nodecorev1alpha1.PhaseRunning)
@@ -215,6 +211,7 @@ func (r *SolverReconciler) handleFindCandidate(ctx context.Context, req ctrl.Req
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil
+
 	case nodecorev1alpha1.PhaseRunning:
 		// Check solver expiration
 		if tools.CheckExpiration(solver.Status.SolverPhase.LastChangeTime, flags.ExpirationPhaseRunning) {
@@ -269,14 +266,35 @@ func (r *SolverReconciler) handleReserveAndBuy(ctx context.Context, req ctrl.Req
 	case nodecorev1alpha1.PhaseIdle:
 		var partition *nodecorev1alpha1.Partition
 		klog.Infof("Creating the Reservation %s", req.NamespacedName.Name)
+		var pcList []advertisementv1alpha1.PeeringCandidate
+		pc := advertisementv1alpha1.PeeringCandidate{}
 		// Create the Reservation
-		var pc advertisementv1alpha1.PeeringCandidate
-		pcNamespaceName := types.NamespacedName{Name: solver.Status.PeeringCandidate.Name, Namespace: solver.Status.PeeringCandidate.Namespace}
 
-		// Get the PeeringCandidate from the Solver
-		if err := r.Get(ctx, pcNamespaceName, &pc); err != nil {
-			klog.Errorf("Error when getting PeeringCandidate %s: %s", solver.Status.PeeringCandidate.Name, err)
+		pcList, err := r.searchPeeringCandidates(ctx, solver)
+		if err != nil {
+			klog.Errorf("Error when searching and booking a candidate for Solver %s: %s", req.NamespacedName.Name, err)
 			return ctrl.Result{}, err
+		}
+
+		// Filter PeeringCandidate by SolverID
+		for i := range pcList {
+			if pcList[i].Spec.Available {
+				pc = pcList[i]
+				// Update the SolverID in the PeeringCandidate selected if it is different from the current Solver
+				if pc.Spec.SolverID != solver.Name {
+					pc.Spec.SolverID = solver.Name
+					if err := r.Client.Update(ctx, &pc); err != nil {
+						klog.Errorf("Error when updating PeeringCandidate %s for Solver %s: %s", pc.Name, solver.Name, err)
+						return ctrl.Result{}, err
+					}
+				}
+				break
+			}
+		}
+
+		if pc.Name == "" {
+			klog.Errorf("No PeeringCandidate found for Solver %s:", solver.Name)
+			return ctrl.Result{}, nil
 		}
 
 		if solver.Spec.Selector != nil {
@@ -336,31 +354,7 @@ func (r *SolverReconciler) handleReserveAndBuy(ctx context.Context, req ctrl.Req
 	case nodecorev1alpha1.PhaseAllocating:
 		klog.Infof("Solver %s has reserved and purchased the resources, creating the Allocation", req.NamespacedName.Name)
 		// Create the Allocation
-		contractNamespaceName := types.NamespacedName{Name: solver.Status.Contract.Name, Namespace: solver.Status.Contract.Namespace}
-		contract := reservationv1alpha1.Contract{}
-		err := r.Client.Get(ctx, contractNamespaceName, &contract)
-		if err != nil {
-			klog.Errorf("Error when getting Contract for Solver %s: %s", solver.Name, err)
-			return ctrl.Result{}, err
-		}
-		vnName := namings.ForgeVirtualNodeName(contract.Spec.SellerCredentials.ClusterName)
-		allocation := resourceforge.ForgeAllocation(&contract, solver.Name, vnName, nodecorev1alpha1.Local, nodecorev1alpha1.VirtualNode)
-		if err := r.Client.Create(ctx, allocation); err != nil {
-			klog.Errorf("Error when creating Allocation for Solver %s: %s", solver.Name, err)
-			return ctrl.Result{}, err
-		}
-		klog.Infof("Allocation %s created", allocation.Name)
-		solver.Status.Allocation = nodecorev1alpha1.GenericRef{
-			Name:      allocation.Name,
-			Namespace: allocation.Namespace,
-		}
-		solver.SetReserveAndBuyStatus(nodecorev1alpha1.PhaseSolved)
-		solver.SetPhase(nodecorev1alpha1.PhaseRunning, "Allocation created")
-		solver.Status.Credentials = contract.Spec.SellerCredentials
-		if err := r.updateSolverStatus(ctx, solver); err != nil {
-			klog.Errorf("Error when updating Solver %s status: %s", req.NamespacedName, err)
-			return ctrl.Result{}, err
-		}
+		//TODO: delete allocating phase
 		return ctrl.Result{}, nil
 	case nodecorev1alpha1.PhaseFailed:
 		klog.Infof("Solver %s has failed to reserve and buy the resources", req.NamespacedName.Name)
@@ -386,37 +380,50 @@ func (r *SolverReconciler) handlePeering(ctx context.Context, req ctrl.Request, 
 	switch peeringStatus {
 	case nodecorev1alpha1.PhaseIdle:
 		klog.Infof("Solver %s is trying to enstablish a peering", req.NamespacedName.Name)
-		credentials := solver.Status.Credentials
-		_, err := virtualfabricmanager.PeerWithCluster(ctx, r.Client, credentials.ClusterID,
-			credentials.ClusterName, credentials.Endpoint, credentials.Token)
+
+		contractNamespaceName := types.NamespacedName{Name: solver.Status.Contract.Name, Namespace: solver.Status.Contract.Namespace}
+		contract := reservationv1alpha1.Contract{}
+		err := r.Client.Get(ctx, contractNamespaceName, &contract)
 		if err != nil {
-			klog.Errorf("Error when peering with cluster %s: %s", credentials.ClusterName, err)
-			solver.SetPeeringStatus(nodecorev1alpha1.PhaseFailed)
-			if err := r.updateSolverStatus(ctx, solver); err != nil {
-				klog.Errorf("Error when updating Solver %s status: %s", req.NamespacedName, err)
-				return ctrl.Result{}, err
-			}
+			klog.Errorf("Error when getting Contract for Solver %s: %s", solver.Name, err)
 			return ctrl.Result{}, err
 		}
-		klog.Infof("Solver %s has started the peering with cluster %s", req.NamespacedName.Name, credentials.ClusterName)
+		vnName := namings.ForgeVirtualNodeName(contract.Spec.SellerCredentials.ClusterName)
+		allocation := resourceforge.ForgeAllocation(&contract, solver.Name, vnName, nodecorev1alpha1.Local, nodecorev1alpha1.VirtualNode)
+		if err := r.Client.Create(ctx, allocation); err != nil {
+			klog.Errorf("Error when creating Allocation for Solver %s: %s", solver.Name, err)
+			return ctrl.Result{}, err
+		}
+		klog.Infof("Allocation %s created", allocation.Name)
+		solver.Status.Allocation = nodecorev1alpha1.GenericRef{
+			Name:      allocation.Name,
+			Namespace: allocation.Namespace,
+		}
 		solver.SetPeeringStatus(nodecorev1alpha1.PhaseRunning)
-		solver.SetPhase(nodecorev1alpha1.PhaseRunning, "Solver is peering with cluster "+credentials.ClusterName)
+		solver.SetPhase(nodecorev1alpha1.PhaseRunning, "Allocation created")
+		solver.Status.Credentials = contract.Spec.SellerCredentials
 		if err := r.updateSolverStatus(ctx, solver); err != nil {
 			klog.Errorf("Error when updating Solver %s status: %s", req.NamespacedName, err)
 			return ctrl.Result{}, err
 		}
+
 		return ctrl.Result{}, nil
+
 	case nodecorev1alpha1.PhaseRunning:
 		klog.Info("Checking peering status")
 		fc, err := fcutils.GetForeignClusterByID(ctx, r.Client, solver.Status.Credentials.ClusterID)
 		if err != nil {
-			klog.Errorf("Error when getting ForeignCluster for Solver %s: %s", solver.Name, err)
-			solver.SetPeeringStatus(nodecorev1alpha1.PhaseFailed)
+			if errors.IsNotFound(err) {
+				klog.Infof("ForeignCluster %s not found", solver.Status.Credentials.ClusterID)
+			} else {
+				klog.Errorf("Error when getting ForeignCluster %s: %v", solver.Status.Credentials.ClusterID, err)
+				solver.SetPeeringStatus(nodecorev1alpha1.PhaseFailed)
+			}
 			if err := r.updateSolverStatus(ctx, solver); err != nil {
 				klog.Errorf("Error when updating Solver %s status: %s", req.NamespacedName, err)
 				return ctrl.Result{}, err
 			}
-			return ctrl.Result{}, err
+			return ctrl.Result{}, nil
 		}
 		if fcutils.IsOutgoingJoined(fc) &&
 			fcutils.IsAuthenticated(fc) &&
@@ -483,11 +490,11 @@ func (r *SolverReconciler) searchPeeringCandidates(ctx context.Context,
 		return nil, errors.NewNotFound(schema.GroupResource{Group: "advertisement", Resource: "PeeringCandidate"}, "PeeringCandidate")
 	}
 
-	// Filter the reserved PeeringCandidates
+	// Filter out the PeeringCandidates that are not available
 	filtered := []advertisementv1alpha1.PeeringCandidate{}
 	for i := range pc.Items {
 		p := pc.Items[i]
-		if !p.Spec.Reserved && p.Spec.SolverID == "" {
+		if p.Spec.Available {
 			filtered = append(filtered, p)
 		}
 	}
@@ -505,49 +512,23 @@ func (r *SolverReconciler) searchPeeringCandidates(ctx context.Context,
 }
 
 // TODO: unify this logic with the one of the discovery controller.
-func (r *SolverReconciler) selectAndBookPeeringCandidate(ctx context.Context,
-	solver *nodecorev1alpha1.Solver, pcList []advertisementv1alpha1.PeeringCandidate) (*advertisementv1alpha1.PeeringCandidate, error) {
+func (r *SolverReconciler) selectAndBookPeeringCandidate(
+	pcList []advertisementv1alpha1.PeeringCandidate) (*advertisementv1alpha1.PeeringCandidate, error) {
 	// Select the first PeeringCandidate
 
-	var selected *advertisementv1alpha1.PeeringCandidate
+	var pc *advertisementv1alpha1.PeeringCandidate
 
 	for i := range pcList {
-		pc := pcList[i]
+		pc = &pcList[i]
 		// Select the first PeeringCandidate that is not reserved
-		if !pc.Spec.Reserved && pc.Spec.SolverID == "" {
-			// Book the PeeringCandidate
-			pc.Spec.Reserved = true
-			pc.Spec.SolverID = solver.Name
+		if pc.Spec.Available {
+			return pc, nil
 
-			// Update the PeeringCandidate
-			if err := r.Update(ctx, &pc); err != nil {
-				klog.Errorf("Error when updating PeeringCandidate %s: %s", selected.Name, err)
-				continue
-			}
-
-			// Getting the just updated PeeringCandidate
-			if err := r.Get(ctx, types.NamespacedName{Name: pc.Name, Namespace: pc.Namespace}, selected); err != nil {
-				klog.Errorf("Error when getting the reserved PeeringCandidate %s: %s", selected.Name, err)
-				continue
-			}
-
-			// Check if the PeeringCandidate has been reserved correctly
-			if !pc.Spec.Reserved || pc.Spec.SolverID != solver.Name {
-				klog.Errorf("Error when reserving PeeringCandidate %s. Trying with another one", selected.Name)
-				continue
-			}
-
-			break
 		}
 	}
 
-	// check if a PeeringCandidate has been selected
-	if selected == nil || selected.Name == "" {
-		klog.Infof("No PeeringCandidate selected")
-		return nil, errors.NewNotFound(schema.GroupResource{Group: "advertisement", Resource: "PeeringCandidate"}, "PeeringCandidate")
-	}
-
-	return selected, nil
+	klog.Infof("No PeeringCandidate selected")
+	return nil, errors.NewNotFound(schema.GroupResource{Group: "advertisement", Resource: "PeeringCandidate"}, "PeeringCandidate")
 }
 
 func (r *SolverReconciler) createOrGetDiscovery(ctx context.Context, solver *nodecorev1alpha1.Solver) (*advertisementv1alpha1.Discovery, error) {

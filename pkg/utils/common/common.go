@@ -178,11 +178,10 @@ func CheckSelector(selector *models.Selector) error {
 // DiscoveryStatusCheck checks the status of the discovery.
 func DiscoveryStatusCheck(solver *nodecorev1alpha1.Solver, discovery *advertisementv1alpha1.Discovery) {
 	if discovery.Status.Phase.Phase == nodecorev1alpha1.PhaseSolved {
-		klog.Infof("Discovery %s has found a candidate: %s", discovery.Name, discovery.Status.PeeringCandidate)
+		klog.Infof("Discovery %s has found candidates: %s", discovery.Name, discovery.Status.PeeringCandidateList)
 		solver.Status.FindCandidate = nodecorev1alpha1.PhaseSolved
-		solver.Status.PeeringCandidate = discovery.Status.PeeringCandidate
 		solver.Status.DiscoveryPhase = nodecorev1alpha1.PhaseSolved
-		solver.SetPhase(nodecorev1alpha1.PhaseRunning, "Solver has found a candidate")
+		solver.SetPhase(nodecorev1alpha1.PhaseRunning, "Solver has completed the Discovery phase")
 	}
 	if discovery.Status.Phase.Phase == nodecorev1alpha1.PhaseFailed {
 		klog.Infof("Discovery %s has failed. Reason: %s", discovery.Name, discovery.Status.Phase.Message)
@@ -213,7 +212,7 @@ func ReservationStatusCheck(solver *nodecorev1alpha1.Solver, reservation *reserv
 	if reservation.Status.Phase.Phase == nodecorev1alpha1.PhaseSolved {
 		klog.Infof("Reservation %s has reserved and purchase the flavour %s", reservation.Name, flavourName)
 		solver.Status.ReservationPhase = nodecorev1alpha1.PhaseSolved
-		solver.Status.ReserveAndBuy = nodecorev1alpha1.PhaseAllocating
+		solver.Status.ReserveAndBuy = nodecorev1alpha1.PhaseSolved
 		solver.Status.Contract = reservation.Status.Contract
 		solver.SetPhase(nodecorev1alpha1.PhaseRunning, "Reservation: Flavour reserved and purchased")
 	}
